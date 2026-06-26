@@ -2,8 +2,14 @@
 RunPod serverless handler — SeedVR2 video upscaler.
 
 Contract (matches the Local AI Aggregator app's /api/video/upscale):
-  input:  { "video_base64": "<raw base64 mp4>", "scale": 2 | 4, "seed"?, "batch_size"? }
-  output: { "video": "<base64 mp4>" }   (or { "error": "..." })
+  input (R2 transit):  { "source_url": "<presigned R2 GET>",
+                         "output_url": "<presigned R2 PUT>", "scale": 2|4, "seed"?, "batch_size"? }
+  input (legacy inline): { "video_base64": "<raw base64 mp4>", "scale": 2|4 }
+  output: { "ok": true }  when output_url is given (clip PUT straight to R2)
+          { "video": "<base64 mp4>" }  for the inline path   (or { "error": "..." })
+
+R2 transit removes RunPod's ~10 MB request cap: the worker pulls the source from a
+presigned URL and pushes the result back to another, so the app stays credential-only.
 
 Runs a fixed ComfyUI workflow (seedvr2_upscale_api.json):
   VHS_LoadVideoPath -> SeedVR2 (DiT + VAE loaders) -> SeedVR2VideoUpscaler -> VHS_VideoCombine
@@ -68,7 +74,17 @@ def get_history(prompt_id):
         return json.loads(r.read())
 
 
-def get_output_video(ws, prompt):
+def download_url_to_file(url, temp_dir, filename):
+    """Stream a (presigned) URL down to a local file — for R2-transit sources."""
+    os.makedirs(temp_dir, exist_ok=True)
+    path = os.path.abspath(os.path.join(temp_dir, filename))
+    urllib.request.urlretrieve(url, path)
+    logger.info(f"Downloaded source video -> {path} ({os.path.getsize(path)} bytes)")
+    return path
+
+
+def get_output_path(ws, prompt):
+    """Run the workflow; return the absolute path of the produced video file."""
     prompt_id = queue_prompt(prompt)["prompt_id"]
     while True:
         out = ws.recv()
@@ -83,8 +99,7 @@ def get_output_video(ws, prompt):
         node_output = history["outputs"][node_id]
         if "gifs" in node_output:
             for video in node_output["gifs"]:
-                with open(video["fullpath"], "rb") as f:
-                    return base64.b64encode(f.read()).decode("utf-8")
+                return video["fullpath"]
     return None
 
 
@@ -103,9 +118,14 @@ def handler(job):
     job_input = job.get("input", {})
     task_id = f"task_{uuid.uuid4()}"
 
-    if "video_base64" not in job_input:
-        return {"error": "video_base64 is required"}
-    video_path = save_base64_to_file(job_input["video_base64"], task_id, "input.mp4")
+    source_url = job_input.get("source_url")
+    if source_url:
+        # R2 transit: stream the source clip in from a presigned URL (no size cap).
+        video_path = download_url_to_file(source_url, task_id, "input.mp4")
+    elif job_input.get("video_base64"):
+        video_path = save_base64_to_file(job_input["video_base64"], task_id, "input.mp4")
+    else:
+        return {"error": "source_url or video_base64 is required"}
 
     try:
         scale = int(job_input.get("scale", 2))
@@ -141,12 +161,26 @@ def handler(job):
                 raise Exception(f"WebSocket connect failed: {e}")
             time.sleep(5)
 
-    video_b64 = get_output_video(ws, prompt)
+    out_path = get_output_path(ws, prompt)
     ws.close()
+    if not out_path or not os.path.exists(out_path):
+        return {"error": "ComfyUI produced no video output"}
 
-    if video_b64:
-        return {"video": video_b64}
-    return {"error": "ComfyUI produced no video output"}
+    output_url = job_input.get("output_url")
+    if output_url:
+        # R2 transit: PUT the finished clip to the presigned URL (plain HTTP, no
+        # creds). The app pulls it from R2 and acks only { ok } here.
+        with open(out_path, "rb") as f:
+            data = f.read()
+        put_req = urllib.request.Request(output_url, data=data, method="PUT")
+        put_req.add_header("Content-Type", "video/mp4")
+        with urllib.request.urlopen(put_req) as resp:
+            logger.info(f"PUT result to R2: HTTP {resp.getcode()} ({len(data)} bytes)")
+        return {"ok": True, "bytes": len(data)}
+
+    # Inline fallback (small clips / legacy): return base64.
+    with open(out_path, "rb") as f:
+        return {"video": base64.b64encode(f.read()).decode("utf-8")}
 
 
 runpod.serverless.start({"handler": handler})
