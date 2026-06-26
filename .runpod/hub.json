@@ -1,0 +1,14 @@
+{
+    "title": "SeedVR2 Video Upscaler",
+    "description": "Diffusion video upscaler (SeedVR2 7B on ComfyUI). Input { video_base64, scale: 2|4 } -> output { video } (base64 mp4). Upscales the shortest edge by the scale factor with temporal consistency and audio passthrough. Weights auto-download on first job.",
+    "type": "serverless",
+    "category": "video",
+    "config": {
+        "runsOn": "GPU",
+        "containerDiskInGb": 100,
+        "gpuCount": 1,
+        "allowedCudaVersions": [
+            "12.8"
+        ]
+    }
+}
