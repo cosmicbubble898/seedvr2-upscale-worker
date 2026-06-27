@@ -127,12 +127,13 @@ def handler(job):
     else:
         return {"error": "source_url or video_base64 is required"}
 
+    # Any scale 1-4x (2x, 3x, 4x, even 2.5x) — the upscaler targets a resolution,
+    # not a fixed factor, so there's no reason to lock it to 2/4.
     try:
-        scale = int(job_input.get("scale", 2))
+        scale = float(job_input.get("scale", 2))
     except Exception:
-        scale = 2
-    if scale not in (2, 4):
-        scale = 2
+        scale = 2.0
+    scale = max(1.0, min(4.0, scale))
 
     short_edge, fps = ffprobe_info(video_path)
     target_resolution = max(16, int(round(short_edge * scale / 2)) * 2)
@@ -143,10 +144,22 @@ def handler(job):
 
     prompt["1"]["inputs"]["video"] = video_path
     prompt["4"]["inputs"]["resolution"] = target_resolution
+    # Per-job tuning overrides — experiment without rebuilding. node 4 = upscaler,
+    # node 3 = VAE. Anything not sent keeps the workflow default.
+    n4 = prompt["4"]["inputs"]
     if "seed" in job_input:
-        prompt["4"]["inputs"]["seed"] = int(job_input["seed"])
+        n4["seed"] = int(job_input["seed"])
     if "batch_size" in job_input:
-        prompt["4"]["inputs"]["batch_size"] = int(job_input["batch_size"])
+        n4["batch_size"] = int(job_input["batch_size"])
+    if "temporal_overlap" in job_input:
+        n4["temporal_overlap"] = int(job_input["temporal_overlap"])
+    if "offload_device" in job_input:
+        n4["offload_device"] = str(job_input["offload_device"])
+    n3 = prompt["3"]["inputs"]
+    if "decode_tiled" in job_input:
+        n3["decode_tiled"] = bool(job_input["decode_tiled"])
+    if "encode_tiled" in job_input:
+        n3["encode_tiled"] = bool(job_input["encode_tiled"])
     prompt["5"]["inputs"]["frame_rate"] = fps
 
     wait_for_comfy()

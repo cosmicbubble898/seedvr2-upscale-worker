@@ -28,10 +28,10 @@
     "inputs": {
       "model": "ema_vae_fp16.safetensors",
       "device": "cuda:0",
-      "encode_tiled": false,
+      "encode_tiled": true,
       "encode_tile_size": 1024,
       "encode_tile_overlap": 128,
-      "decode_tiled": false,
+      "decode_tiled": true,
       "decode_tile_size": 1024,
       "decode_tile_overlap": 128,
       "tile_debug": "false",
